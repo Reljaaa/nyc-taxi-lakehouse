@@ -5,6 +5,9 @@
 # MAGIC # Ingest TLC Files to Landing
 
 # COMMAND ----------
+# MAGIC %pip install azure-storage-file-datalake azure-identity
+
+# COMMAND ----------
 
 from src.ingestion.download import download_tlc_files, download_zone_lookup
 
