@@ -1,3 +1,36 @@
+# Project planning & learning notes (kept local, not shared)
+CLAUDE.md
+TEACH-ME.md
+PLAN.md
+AGENTS.md
+PROJECT-JOURNAL.md
+INTERVIEW-PREP.md
+phases/
+learning-reviews/
+docs/AI-WORKFLOW.md
+memory/
+
+# Claude Code local settings
+.claude/
+
+# Databricks
+.databricks/
+*.dbc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — CRITICAL
+*.key
+*.pem
+secrets/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
