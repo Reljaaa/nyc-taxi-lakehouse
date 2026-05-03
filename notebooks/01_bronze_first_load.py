@@ -60,14 +60,14 @@ yellow_january_partitioned_df.printSchema()
 
 # COMMAND ----------
 
-spark.sql("CREATE DATABASE IF NOT EXISTS bronze")
+spark.sql("USE CATALOG bronze")
 
 (
     yellow_january_partitioned_df.write
     .format("delta")
     .mode("append")
     .partitionBy("year", "month")
-    .saveAsTable("bronze.yellow_trips_raw")
+    .saveAsTable("default.yellow_trips_raw")  
 )
 
 # COMMAND ----------
@@ -76,7 +76,7 @@ spark.sql("CREATE DATABASE IF NOT EXISTS bronze")
 
 # COMMAND ----------
 
-bronze_df = spark.table("bronze.yellow_trips_raw")
+bronze_df = spark.table("default.yellow_trips_raw")
 bronze_row_count = bronze_df.count()
 
 print(f"Source row count: {source_row_count}")
