@@ -19,12 +19,10 @@ download_tlc_files(
     year=YEAR,
     months=MONTHS,
     landing_base_path=LANDING_BASE_PATH,
-    dbutils=dbutils,
 )
 
 # COMMAND ----------
 
 download_zone_lookup(
     landing_base_path=LANDING_BASE_PATH,
-    dbutils=dbutils,
 )
