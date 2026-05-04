@@ -14,7 +14,7 @@ spark.sql("USE CATALOG bronze")
 
 BRONZE_TABLE = "default.yellow_trips_raw"
 LANDING_BASE_PATH = "abfss://landing@nyctaxilakehouse.dfs.core.windows.net"
-ZONE_LOOKUP_PATH = f"{LANDING_BASE_PATH}/taxi_zone_lookup.csv"
+ZONE_LOOKUP_PATH = f"{LANDING_BASE_PATH}/lookups/taxi_zone_lookup.csv"
 ZONE_LOOKUP_TABLE = "default.taxi_zone_lookup"
 
 bronze_df = spark.table(BRONZE_TABLE)
