@@ -8,16 +8,15 @@ from typing import Any
 
 import requests
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+from src.utils.retry import (
+    TransientHTTPError,
+    raise_for_transient_status,
+    retry_with_backoff,
 )
 logger = logging.getLogger(__name__)
 
 TLC_TRIP_DATA_BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 ZONE_LOOKUP_URL = "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
-MAX_ATTEMPTS = 3
 CHUNK_SIZE_BYTES = 1024 * 1024
 
 
@@ -61,53 +60,42 @@ def _download_to_adls(
     staging_dir: str,
 ) -> None:
     local_path = f"{staging_dir}/{file_name}"
-    last_error: Exception | None = None
+    start_time = time.monotonic()
 
-    for attempt in range(MAX_ATTEMPTS):
-        start_time = time.monotonic()
+    try:
+        logger.info("Starting download file=%s", file_name)
+        file_size_bytes = _download_to_local_file(source_url, local_path)
 
-        try:
-            logger.info("Starting download file=%s attempt=%s", file_name, attempt + 1)
-            file_size_bytes = _download_to_local_file(source_url, local_path)
+        dbutils.fs.cp(f"file:{local_path}", destination_path)
 
-            dbutils.fs.cp(f"file:{local_path}", destination_path)
-
-            duration_seconds = time.monotonic() - start_time
-            logger.info(
-                "Completed download file=%s size_mb=%.2f duration_seconds=%.2f "
-                "status=success",
-                file_name,
-                file_size_bytes / (1024 * 1024),
-                duration_seconds,
-            )
-            return
-        except Exception as error:
-            last_error = error
-            duration_seconds = time.monotonic() - start_time
-            file_size_bytes = _local_file_size_bytes(local_path)
-            _log_attempt_failure(
-                file_name,
-                attempt,
-                file_size_bytes,
-                duration_seconds,
-                error,
-            )
-        finally:
-            _delete_local_file(local_path)
-
-        if attempt < MAX_ATTEMPTS - 1:
-            time.sleep(2**attempt)
-
-    raise RuntimeError(
-        f"Failed to download {file_name} after {MAX_ATTEMPTS} attempts"
-    ) from last_error
+        duration_seconds = time.monotonic() - start_time
+        logger.info(
+            "Completed download file=%s size_mb=%.2f duration_seconds=%.2f "
+            "status=success",
+            file_name,
+            file_size_bytes / (1024 * 1024),
+            duration_seconds,
+        )
+    finally:
+        _delete_local_file(local_path)
 
 
+@retry_with_backoff(
+    max_attempts=5,
+    initial_wait_s=1.0,
+    max_wait_s=30.0,
+    retry_on=(
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+        TransientHTTPError,
+    ),
+)
 def _download_to_local_file(source_url: str, local_path: str) -> int:
     file_size_bytes = 0
 
     with requests.get(source_url, stream=True, timeout=60) as response:
-        response.raise_for_status()
+        raise_for_transient_status(response)
 
         with open(local_path, "wb") as local_file:
             for chunk in response.iter_content(chunk_size=CHUNK_SIZE_BYTES):
@@ -116,45 +104,6 @@ def _download_to_local_file(source_url: str, local_path: str) -> int:
                     file_size_bytes += len(chunk)
 
     return file_size_bytes
-
-
-def _log_attempt_failure(
-    file_name: str,
-    attempt: int,
-    file_size_bytes: int,
-    duration_seconds: float,
-    error: Exception,
-) -> None:
-    if attempt < MAX_ATTEMPTS - 1:
-        logger.warning(
-            "Download attempt failed file=%s attempt=%s size_mb=%.2f "
-            "duration_seconds=%.2f status=retrying error=%s",
-            file_name,
-            attempt + 1,
-            file_size_bytes / (1024 * 1024),
-            duration_seconds,
-            error,
-            exc_info=True,
-        )
-        return
-
-    logger.error(
-        "Download failed file=%s attempt=%s size_mb=%.2f duration_seconds=%.2f "
-        "status=failed error=%s",
-        file_name,
-        attempt + 1,
-        file_size_bytes / (1024 * 1024),
-        duration_seconds,
-        error,
-        exc_info=True,
-    )
-
-
-def _local_file_size_bytes(local_path: str) -> int:
-    if os.path.exists(local_path):
-        return os.path.getsize(local_path)
-
-    return 0
 
 
 def _delete_local_file(local_path: str) -> None:

@@ -17,12 +17,10 @@ from src.ingestion.bronze import (
     ingest_single_month,
     record_ingested_file,
 )
+from src.utils.logging import configure_logging
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 LANDING_BASE_PATH = "abfss://landing@nyctaxilakehouse.dfs.core.windows.net"
