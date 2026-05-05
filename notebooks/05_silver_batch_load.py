@@ -76,4 +76,119 @@ print(
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## Step 2: Validation Logic (3.4)
+
+# COMMAND ----------
+
+def validate_normalized(df: DataFrame) -> DataFrame:
+    """Add per-row Silver validation flags and failure reason codes."""
+    return (
+        df.withColumn(
+            "is_valid_fare_amount",
+            F.col("fare_amount").isNull()
+            | ((F.col("fare_amount") > 0) & (F.col("fare_amount") <= 500)),
+        )
+        .withColumn(
+            "is_valid_trip_distance",
+            F.col("trip_distance").isNull()
+            | ((F.col("trip_distance") > 0) & (F.col("trip_distance") <= 200)),
+        )
+        .withColumn(
+            "is_valid_passenger_count",
+            F.col("passenger_count").isNull()
+            | ((F.col("passenger_count") >= 1) & (F.col("passenger_count") <= 6)),
+        )
+        .withColumn(
+            "is_valid_datetime_order",
+            F.col("pickup_datetime").isNull()
+            | F.col("dropoff_datetime").isNull()
+            | (F.col("dropoff_datetime") > F.col("pickup_datetime")),
+        )
+        .withColumn(
+            "is_valid_trip_duration",
+            F.col("trip_duration_minutes").isNull()
+            | (F.col("trip_duration_minutes") <= 180),
+        )
+        .withColumn(
+            "is_valid_total_amount",
+            F.col("total_amount").isNull() | (F.col("total_amount") > 0),
+        )
+        .withColumn(
+            "is_valid_tip_amount",
+            F.col("tip_amount").isNull() | (F.col("tip_amount") >= 0),
+        )
+        .withColumn(
+            "is_valid_tolls_amount",
+            F.col("tolls_amount").isNull() | (F.col("tolls_amount") >= 0),
+        )
+        .withColumn(
+            "validation_failures",
+            F.array_compact(
+                F.array(
+                    F.when(
+                        ~F.col("is_valid_fare_amount"),
+                        F.lit("invalid_fare_amount"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_trip_distance"),
+                        F.lit("invalid_trip_distance"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_passenger_count"),
+                        F.lit("invalid_passenger_count"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_datetime_order"),
+                        F.lit("invalid_datetime_order"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_trip_duration"),
+                        F.lit("invalid_trip_duration"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_total_amount"),
+                        F.lit("invalid_total_amount"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_tip_amount"),
+                        F.lit("invalid_tip_amount"),
+                    ),
+                    F.when(
+                        ~F.col("is_valid_tolls_amount"),
+                        F.lit("invalid_tolls_amount"),
+                    ),
+                )
+            ),
+        )
+        .withColumn("is_valid", F.size(F.col("validation_failures")) == 0)
+    )
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Validation Results
+
+# COMMAND ----------
+
+bronze_df = spark.table(BRONZE_TABLE)
+normalized_df = normalize_bronze(bronze_df)
+validated_df = validate_normalized(normalized_df)
+
+total_row_count = validated_df.count()
+valid_row_count = validated_df.filter(F.col("is_valid") == True).count()
+invalid_row_count = validated_df.filter(F.col("is_valid") == False).count()
+
+print(f"Total rows: {total_row_count}")
+print(f"Valid rows: {valid_row_count}")
+print(f"Invalid rows: {invalid_row_count}")
+
+validation_failure_counts_df = (
+    validated_df.select(F.explode("validation_failures").alias("validation_failure"))
+    .groupBy("validation_failure")
+    .count()
+    .orderBy(F.desc("count"))
+)
+
+display(validation_failure_counts_df)
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## Step 3: Quarantine Split + Write (3.5)
