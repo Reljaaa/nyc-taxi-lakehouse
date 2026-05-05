@@ -12,6 +12,7 @@ from src.utils.logging import configure_logging
 
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
+from pyspark.sql.window import Window
 
 
 configure_logging()
@@ -24,6 +25,14 @@ SILVER_CATALOG = "silver"
 SILVER_SCHEMA = "default"
 SILVER_CLEAN_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_trips_clean"
 SILVER_QUARANTINE_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_quarantine"
+DEDUP_KEY = [
+    "vendor_id",
+    "pickup_datetime",
+    "dropoff_datetime",
+    "pickup_location_id",
+    "dropoff_location_id",
+    "fare_amount",
+]
 
 # COMMAND ----------
 # MAGIC %md
@@ -202,6 +211,28 @@ display(validation_failure_counts_df)
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC ## Deduplication (3.6)
+
+# COMMAND ----------
+
+def deduplicate(df: DataFrame) -> DataFrame:
+    """Keep the latest clean row for each configured duplicate key."""
+    if "_silver_ingestion_timestamp" not in df.columns:
+        raise ValueError(
+            "Missing _silver_ingestion_timestamp required for deduplication"
+        )
+
+    window_spec = Window.partitionBy(*DEDUP_KEY).orderBy(
+        F.col("_silver_ingestion_timestamp").desc()
+    )
+    return (
+        df.withColumn("row_num", F.row_number().over(window_spec))
+        .filter(F.col("row_num") == 1)
+        .drop("row_num")
+    )
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## Step 3: Quarantine Split + Write (3.5)
 
 # COMMAND ----------
@@ -230,6 +261,11 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
         partitioned_df.filter(F.col("is_valid") == True)
         .drop(*validation_flag_columns, "is_valid", "validation_failures")
     )
+    before_count = clean_df.count()
+    clean_df = deduplicate(clean_df)
+    after_count = clean_df.count()
+    logger.info("Dedup removed %s rows from clean", before_count - after_count)
+
     quarantine_df = (
         partitioned_df.filter(F.col("is_valid") == False)
         .drop(*validation_flag_columns, "is_valid")
