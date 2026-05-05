@@ -6,13 +6,24 @@
 
 # COMMAND ----------
 
+import logging
+
+from src.utils.logging import configure_logging
+
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
 
 
+configure_logging()
+logger = logging.getLogger(__name__)
+
 spark.sql("USE CATALOG bronze")
 
 BRONZE_TABLE = "default.yellow_trips_raw"
+SILVER_CATALOG = "silver"
+SILVER_SCHEMA = "default"
+SILVER_CLEAN_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_trips_clean"
+SILVER_QUARANTINE_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_quarantine"
 
 # COMMAND ----------
 # MAGIC %md
@@ -192,3 +203,73 @@ display(validation_failure_counts_df)
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## Step 3: Quarantine Split + Write (3.5)
+
+# COMMAND ----------
+
+def write_silver(validated_df: DataFrame) -> tuple[int, int]:
+    """Split validated rows and overwrite clean/quarantine Silver Delta tables."""
+    logger.info("Starting silver write")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SILVER_CATALOG}.{SILVER_SCHEMA}")
+
+    partitioned_df = validated_df.withColumn(
+        "year", F.year(F.col("pickup_datetime"))
+    ).withColumn("month", F.month(F.col("pickup_datetime")))
+
+    validation_flag_columns = [
+        "is_valid_fare_amount",
+        "is_valid_trip_distance",
+        "is_valid_passenger_count",
+        "is_valid_datetime_order",
+        "is_valid_trip_duration",
+        "is_valid_total_amount",
+        "is_valid_tip_amount",
+        "is_valid_tolls_amount",
+    ]
+
+    clean_df = (
+        partitioned_df.filter(F.col("is_valid") == True)
+        .drop(*validation_flag_columns, "is_valid", "validation_failures")
+    )
+    quarantine_df = (
+        partitioned_df.filter(F.col("is_valid") == False)
+        .drop(*validation_flag_columns, "is_valid")
+    )
+
+    (
+        clean_df.write.format("delta")
+        .partitionBy("year", "month")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(SILVER_CLEAN_TABLE)
+    )
+    (
+        quarantine_df.write.format("delta")
+        .partitionBy("year", "month")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(SILVER_QUARANTINE_TABLE)
+    )
+
+    clean_count = spark.table(SILVER_CLEAN_TABLE).count()
+    quarantine_count = spark.table(SILVER_QUARANTINE_TABLE).count()
+    logger.info(
+        "Silver write completed clean_count=%s quarantine_count=%s",
+        clean_count,
+        quarantine_count,
+    )
+    return (clean_count, quarantine_count)
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Write Silver Tables
+
+# COMMAND ----------
+
+bronze_df = spark.table(BRONZE_TABLE)
+normalized_df = normalize_bronze(bronze_df)
+validated_df = validate_normalized(normalized_df)
+
+clean_count, quarantine_count = write_silver(validated_df)
+
+print(f"Clean rows written to {SILVER_CLEAN_TABLE}: {clean_count}")
+print(f"Quarantine rows written to {SILVER_QUARANTINE_TABLE}: {quarantine_count}")
