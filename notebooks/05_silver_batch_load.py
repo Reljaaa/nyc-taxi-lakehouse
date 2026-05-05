@@ -10,6 +10,7 @@ import logging
 
 from src.utils.logging import configure_logging
 
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
 from pyspark.sql.window import Window
@@ -271,13 +272,32 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
         .drop(*validation_flag_columns, "is_valid")
     )
 
-    (
-        clean_df.write.format("delta")
-        .partitionBy("year", "month")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(SILVER_CLEAN_TABLE)
-    )
+    if spark.catalog.tableExists(SILVER_CLEAN_TABLE):
+        target = DeltaTable.forName(spark, SILVER_CLEAN_TABLE)
+        merge_condition = " AND ".join(
+            f"target.{col} = source.{col}" for col in DEDUP_KEY
+        )
+        (
+            target.alias("target")
+            .merge(clean_df.alias("source"), merge_condition)
+            .whenMatchedUpdateAll(
+                condition=(
+                    "source._silver_ingestion_timestamp > "
+                    "target._silver_ingestion_timestamp"
+                )
+            )
+            .whenNotMatchedInsertAll()
+            .execute()
+        )
+        logger.info("MERGE completed on %s", SILVER_CLEAN_TABLE)
+    else:
+        (
+            clean_df.write.format("delta")
+            .partitionBy("year", "month")
+            .saveAsTable(SILVER_CLEAN_TABLE)
+        )
+        logger.info("First-load created %s", SILVER_CLEAN_TABLE)
+
     (
         quarantine_df.write.format("delta")
         .partitionBy("year", "month")
@@ -297,15 +317,31 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC ## Silver Pipeline
+
+# COMMAND ----------
+
+def silver_pipeline(bronze_table_name: str) -> tuple[int, int]:
+    """Run the full Bronze -> Silver pipeline for a given Bronze table."""
+    logger.info("Silver pipeline starting for %s", bronze_table_name)
+    bronze_df = spark.table(bronze_table_name)
+    normalized_df = normalize_bronze(bronze_df)
+    validated_df = validate_normalized(normalized_df)
+    clean_count, quarantine_count = write_silver(validated_df)
+    logger.info(
+        "Silver pipeline finished clean=%s quarantine=%s",
+        clean_count,
+        quarantine_count,
+    )
+    return (clean_count, quarantine_count)
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## Write Silver Tables
 
 # COMMAND ----------
 
-bronze_df = spark.table(BRONZE_TABLE)
-normalized_df = normalize_bronze(bronze_df)
-validated_df = validate_normalized(normalized_df)
+clean_count, quarantine_count = silver_pipeline(BRONZE_TABLE)
 
-clean_count, quarantine_count = write_silver(validated_df)
-
-print(f"Clean rows written to {SILVER_CLEAN_TABLE}: {clean_count}")
-print(f"Quarantine rows written to {SILVER_QUARANTINE_TABLE}: {quarantine_count}")
+print(f"Clean rows in {SILVER_CLEAN_TABLE}: {clean_count}")
+print(f"Quarantine rows in {SILVER_QUARANTINE_TABLE}: {quarantine_count}")
