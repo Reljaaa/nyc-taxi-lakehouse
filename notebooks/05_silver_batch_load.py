@@ -272,6 +272,29 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
         .drop(*validation_flag_columns, "is_valid")
     )
 
+    hash_excluded_columns = {
+        "_silver_ingestion_timestamp",
+        "_source_file",
+        "year",
+        "month",
+    }
+    business_columns = sorted(
+        c for c in clean_df.columns if c not in hash_excluded_columns
+    )
+    clean_df = clean_df.withColumn(
+        "_row_hash",
+        F.sha2(
+            F.concat_ws(
+                "||",
+                *[
+                    F.coalesce(F.col(c).cast("string"), F.lit("∅"))
+                    for c in business_columns
+                ],
+            ),
+            256,
+        ),
+    )
+
     if spark.catalog.tableExists(SILVER_CLEAN_TABLE):
         target = DeltaTable.forName(spark, SILVER_CLEAN_TABLE)
         merge_condition = " AND ".join(
@@ -282,6 +305,7 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
             .merge(clean_df.alias("source"), merge_condition)
             .whenMatchedUpdateAll(
                 condition=(
+                    "source._row_hash != target._row_hash AND "
                     "source._silver_ingestion_timestamp > "
                     "target._silver_ingestion_timestamp"
                 )
