@@ -7,12 +7,23 @@
 # COMMAND ----------
 
 import logging
+import uuid
+from datetime import datetime
+from typing import NamedTuple
 
 from src.utils.logging import configure_logging
 
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
+from pyspark.sql.types import (
+    LongType,
+    MapType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 from pyspark.sql.window import Window
 
 
@@ -26,6 +37,7 @@ SILVER_CATALOG = "silver"
 SILVER_SCHEMA = "default"
 SILVER_CLEAN_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_trips_clean"
 SILVER_QUARANTINE_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.yellow_quarantine"
+SILVER_DQ_METRICS_TABLE = f"{SILVER_CATALOG}.{SILVER_SCHEMA}.dq_metrics"
 DEDUP_KEY = [
     "vendor_id",
     "pickup_datetime",
@@ -34,6 +46,12 @@ DEDUP_KEY = [
     "dropoff_location_id",
     "fare_amount",
 ]
+
+
+class SilverWriteResult(NamedTuple):
+    clean_count: int
+    quarantine_count: int
+    dedup_removed: int
 
 # COMMAND ----------
 # MAGIC %md
@@ -238,7 +256,7 @@ def deduplicate(df: DataFrame) -> DataFrame:
 
 # COMMAND ----------
 
-def write_silver(validated_df: DataFrame) -> tuple[int, int]:
+def write_silver(validated_df: DataFrame) -> SilverWriteResult:
     """Split validated rows and overwrite clean/quarantine Silver Delta tables."""
     logger.info("Starting silver write")
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SILVER_CATALOG}.{SILVER_SCHEMA}")
@@ -337,7 +355,74 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
         clean_count,
         quarantine_count,
     )
-    return (clean_count, quarantine_count)
+    return SilverWriteResult(
+        clean_count=clean_count,
+        quarantine_count=quarantine_count,
+        dedup_removed=before_count - after_count,
+    )
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## DQ Metrics (3.8)
+
+# COMMAND ----------
+
+def collect_rules_failed(validated_df: DataFrame) -> dict[str, int]:
+    """Collect per-rule failure counts from the validated DataFrame as a Python dict."""
+    rows = (
+        validated_df.select(F.explode("validation_failures").alias("rule"))
+        .groupBy("rule")
+        .count()
+        .collect()
+    )
+    return {row["rule"]: row["count"] for row in rows}
+
+
+def write_dq_metrics(
+    run_id: str,
+    started_at: datetime,
+    finished_at: datetime,
+    rows_in: int,
+    rows_clean: int,
+    rows_quarantined: int,
+    rows_deduped: int,
+    rules_failed: dict[str, int],
+    bronze_table: str,
+) -> None:
+    """Append one DQ metrics row for the current pipeline run."""
+    schema = StructType(
+        [
+            StructField("run_id", StringType(), False),
+            StructField("started_at", TimestampType(), False),
+            StructField("finished_at", TimestampType(), False),
+            StructField("rows_in", LongType(), False),
+            StructField("rows_clean", LongType(), False),
+            StructField("rows_quarantined", LongType(), False),
+            StructField("rows_deduped", LongType(), False),
+            StructField("rules_failed", MapType(StringType(), LongType()), False),
+            StructField("bronze_table", StringType(), False),
+        ]
+    )
+    metrics_row = [
+        (
+            run_id,
+            started_at,
+            finished_at,
+            rows_in,
+            rows_clean,
+            rows_quarantined,
+            rows_deduped,
+            rules_failed,
+            bronze_table,
+        )
+    ]
+    metrics_df = spark.createDataFrame(metrics_row, schema)
+    (
+        metrics_df.write.format("delta")
+        .mode("append")
+        .saveAsTable(SILVER_DQ_METRICS_TABLE)
+    )
+    logger.info("DQ metrics row appended for run_id=%s", run_id)
 
 # COMMAND ----------
 # MAGIC %md
@@ -346,18 +431,40 @@ def write_silver(validated_df: DataFrame) -> tuple[int, int]:
 # COMMAND ----------
 
 def silver_pipeline(bronze_table_name: str) -> tuple[int, int]:
-    """Run the full Bronze -> Silver pipeline for a given Bronze table."""
-    logger.info("Silver pipeline starting for %s", bronze_table_name)
+    """Run the full Bronze -> Silver pipeline and write a DQ metrics row."""
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now()
+    logger.info("Silver pipeline starting run_id=%s for %s", run_id, bronze_table_name)
+
     bronze_df = spark.table(bronze_table_name)
+    rows_in = bronze_df.count()
+
     normalized_df = normalize_bronze(bronze_df)
     validated_df = validate_normalized(normalized_df)
-    clean_count, quarantine_count = write_silver(validated_df)
-    logger.info(
-        "Silver pipeline finished clean=%s quarantine=%s",
-        clean_count,
-        quarantine_count,
+    rules_failed = collect_rules_failed(validated_df)
+
+    result = write_silver(validated_df)
+
+    finished_at = datetime.now()
+    write_dq_metrics(
+        run_id=run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        rows_in=rows_in,
+        rows_clean=result.clean_count,
+        rows_quarantined=result.quarantine_count,
+        rows_deduped=result.dedup_removed,
+        rules_failed=rules_failed,
+        bronze_table=bronze_table_name,
     )
-    return (clean_count, quarantine_count)
+
+    logger.info(
+        "Silver pipeline finished run_id=%s clean=%s quarantine=%s",
+        run_id,
+        result.clean_count,
+        result.quarantine_count,
+    )
+    return (result.clean_count, result.quarantine_count)
 
 # COMMAND ----------
 # MAGIC %md
