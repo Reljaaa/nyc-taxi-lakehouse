@@ -4,9 +4,15 @@
 # MAGIC %md
 # MAGIC # OPTIMIZE + Z-ORDER Benchmark
 # MAGIC
-# MAGIC One-time analysis notebook for capturing before/after Delta table metrics, benchmark timings, and explain plans for the Silver and Gold performance tuning pass.
+# MAGIC One-time analysis notebook. **Run the single code cell below end-to-end.**
+# MAGIC All setup, helpers, table operations, and the final report are consolidated
+# MAGIC into one cell to avoid Databricks serverless cross-cell Python state loss.
 
 # COMMAND ----------
+
+# This is intentionally one large cell. Do NOT split it into multiple cells —
+# Databricks serverless drops Python state between cells intermittently, which
+# turns cross-cell function or constant references into runtime NameErrors.
 
 import logging
 import time
@@ -19,11 +25,7 @@ from pyspark.sql import functions as F
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Constants
-
-# COMMAND ----------
+# ---------- Constants ----------
 
 SILVER_CLEAN_TABLE = "silver.default.yellow_trips_clean"
 GOLD_FCT_TRIPS_TABLE = "gold.default.fct_trips"
@@ -33,11 +35,7 @@ DIM_ZONES_TABLE = "gold.default.dim_zones"
 
 BENCHMARK_ZONE_LOCATION_IDS = [132, 138, 161, 230]
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Helpers
-
-# COMMAND ----------
+# ---------- Helpers ----------
 
 def capture_table_metrics(table_fqn: str) -> dict:
     """Capture Delta table file, size, partition, and Z-ORDER metadata."""
@@ -65,11 +63,9 @@ def run_benchmark_query(sql_text: str, label: str, runs: int = 3) -> dict:
     logger.info("Starting benchmark label=%s runs=%s", label, runs)
     elapsed_runs = []
     for run_number in range(runs):
-        # Databricks serverless compute does not allow CLEAR CACHE or
-        # spark.catalog.clearCache(). Cache is managed by the platform; the
-        # benchmark accepts whatever state serverless provides. AFTER runs read
-        # freshly-written files post-OPTIMIZE which partially offsets warm-cache
-        # bias on BEFORE runs.
+        # Serverless blocks CLEAR CACHE / spark.catalog.clearCache(); accept
+        # whatever cache state platform provides. AFTER runs read freshly-written
+        # post-OPTIMIZE files which partially offsets warm-cache bias on BEFORE.
         started_at = time.time()
         spark.sql(sql_text).collect()
         elapsed = time.time() - started_at
@@ -160,11 +156,7 @@ def print_comparison(
         )
     print()
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Resolve Benchmark Zone Keys
-
-# COMMAND ----------
+# ---------- Resolve Benchmark Zone Keys ----------
 
 zone_key_rows = (
     spark.table(DIM_ZONES_TABLE)
@@ -192,9 +184,6 @@ logger.info(
     location_to_zone_sk,
 )
 
-# Build benchmark SQL strings in the same cell as the zone resolution so all
-# references to BENCHMARK_ZONE_LOCATION_IDS / benchmark_zone_sks share one
-# execution scope (avoids cross-cell state issues observed on Databricks serverless).
 silver_zone_ids_sql = ", ".join(map(str, BENCHMARK_ZONE_LOCATION_IDS))
 gold_zone_sks_sql = ", ".join(map(str, benchmark_zone_sks))
 
@@ -218,52 +207,32 @@ WHERE pickup_zone_sk IN ({gold_zone_sks_sql})
 GROUP BY pickup_zone_sk
 """
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Silver Before
-
-# COMMAND ----------
+# ---------- Silver: Before ----------
 
 silver_before_metrics = capture_table_metrics(SILVER_CLEAN_TABLE)
 silver_before_bench = run_benchmark_query(SILVER_BENCH_SQL, "silver_before", runs=3)
 silver_before_explain = capture_explain_formatted(SILVER_BENCH_SQL)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Silver OPTIMIZE + Z-ORDER
-
-# COMMAND ----------
+# ---------- Silver: OPTIMIZE + Z-ORDER ----------
 
 silver_optimize_seconds = run_optimize(
     f"OPTIMIZE {SILVER_CLEAN_TABLE} ZORDER BY (pickup_location_id, dropoff_location_id)",
     SILVER_CLEAN_TABLE,
 )
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Silver After
-
-# COMMAND ----------
+# ---------- Silver: After ----------
 
 silver_after_metrics = capture_table_metrics(SILVER_CLEAN_TABLE)
 silver_after_bench = run_benchmark_query(SILVER_BENCH_SQL, "silver_after", runs=3)
 silver_after_explain = capture_explain_formatted(SILVER_BENCH_SQL)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Gold Fact Before
-
-# COMMAND ----------
+# ---------- Gold Fact: Before ----------
 
 gold_before_metrics = capture_table_metrics(GOLD_FCT_TRIPS_TABLE)
 gold_before_bench = run_benchmark_query(GOLD_BENCH_SQL, "gold_before", runs=3)
 gold_before_explain = capture_explain_formatted(GOLD_BENCH_SQL)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Gold Fact OPTIMIZE + Z-ORDER
-
-# COMMAND ----------
+# ---------- Gold Fact: OPTIMIZE + Z-ORDER ----------
 
 gold_optimize_seconds = run_optimize(
     # pickup_date_sk is the partition column, so Z-ORDER targets non-partition zone keys.
@@ -271,21 +240,13 @@ gold_optimize_seconds = run_optimize(
     GOLD_FCT_TRIPS_TABLE,
 )
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Gold Fact After
-
-# COMMAND ----------
+# ---------- Gold Fact: After ----------
 
 gold_after_metrics = capture_table_metrics(GOLD_FCT_TRIPS_TABLE)
 gold_after_bench = run_benchmark_query(GOLD_BENCH_SQL, "gold_after", runs=3)
 gold_after_explain = capture_explain_formatted(GOLD_BENCH_SQL)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Pre-Aggregates OPTIMIZE Only
-
-# COMMAND ----------
+# ---------- Pre-Aggregates: OPTIMIZE only ----------
 
 daily_before_metrics = capture_table_metrics(GOLD_DAILY_METRICS_TABLE)
 hourly_before_metrics = capture_table_metrics(GOLD_HOURLY_PATTERNS_TABLE)
@@ -302,11 +263,7 @@ hourly_optimize_seconds = run_optimize(
 daily_after_metrics = capture_table_metrics(GOLD_DAILY_METRICS_TABLE)
 hourly_after_metrics = capture_table_metrics(GOLD_HOURLY_PATTERNS_TABLE)
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Final Consolidated Report
-
-# COMMAND ----------
+# ---------- Final Consolidated Report ----------
 
 print("OPTIMIZE + Z-ORDER comparison")
 print("Databricks serverless does not allow CLEAR CACHE; benchmark timing reflects whatever cache state serverless provides. Interpret median of 3 runs cautiously.")
