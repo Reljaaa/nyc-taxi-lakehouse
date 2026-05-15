@@ -65,8 +65,11 @@ def run_benchmark_query(sql_text: str, label: str, runs: int = 3) -> dict:
     logger.info("Starting benchmark label=%s runs=%s", label, runs)
     elapsed_runs = []
     for run_number in range(runs):
-        # clearCache cannot flush Databricks storage-layer disk cache from notebook code.
-        spark.catalog.clearCache()
+        # Databricks serverless compute does not allow CLEAR CACHE or
+        # spark.catalog.clearCache(). Cache is managed by the platform; the
+        # benchmark accepts whatever state serverless provides. AFTER runs read
+        # freshly-written files post-OPTIMIZE which partially offsets warm-cache
+        # bias on BEFORE runs.
         started_at = time.time()
         spark.sql(sql_text).collect()
         elapsed = time.time() - started_at
@@ -306,7 +309,7 @@ hourly_after_metrics = capture_table_metrics(GOLD_HOURLY_PATTERNS_TABLE)
 # COMMAND ----------
 
 print("OPTIMIZE + Z-ORDER comparison")
-print("Storage-layer disk cache cannot be flushed from notebook code; benchmark timing may still include warm-cache effects.")
+print("Databricks serverless does not allow CLEAR CACHE; benchmark timing reflects whatever cache state serverless provides. Interpret median of 3 runs cautiously.")
 print()
 
 print(f"Silver OPTIMIZE seconds: {silver_optimize_seconds:.2f}")
