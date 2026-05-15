@@ -9,16 +9,23 @@
 import logging
 
 from src.utils.logging import configure_logging
+from src.utils.params import parse_month_range
 
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
+dbutils.widgets.text("start_month", "2024-01")
+dbutils.widgets.text("end_month", "2024-06")
+
+start_month = dbutils.widgets.get("start_month")
+end_month   = dbutils.widgets.get("end_month")
+parsed_month_range = parse_month_range(start_month, end_month)
+expected_year_months = set(parsed_month_range)
+
 BRONZE_TABLE = "default.yellow_trips_raw"
 CONTROL_TABLE = "default.ingested_files"
 LANDING_BASE_PATH = "abfss://landing@nyctaxilakehouse.dfs.core.windows.net"
-EXPECTED_YEAR = 2024
-EXPECTED_MONTHS = list(range(1, 7))
 
 spark.sql("USE CATALOG bronze")
 
@@ -104,9 +111,9 @@ logger.info("A3 schema checks passed")
 # COMMAND ----------
 
 expected_source_files = {
-    f"{LANDING_BASE_PATH}/yellow_taxi/{EXPECTED_YEAR}/{month:02d}/"
-    f"yellow_tripdata_{EXPECTED_YEAR}-{month:02d}.parquet"
-    for month in EXPECTED_MONTHS
+    f"{LANDING_BASE_PATH}/yellow_taxi/{year}/{month:02d}/"
+    f"yellow_tripdata_{year}-{month:02d}.parquet"
+    for year, month in expected_year_months
 }
 actual_source_files = {
     row["_source_file"]
@@ -121,7 +128,6 @@ logger.info("A4 source files set match passed count=%s", len(actual_source_files
 
 # COMMAND ----------
 
-expected_year_months = {(EXPECTED_YEAR, month) for month in EXPECTED_MONTHS}
 actual_year_months = {
     (row["year"], row["month"])
     for row in spark.table(BRONZE_TABLE).select("year", "month").distinct().collect()
@@ -149,13 +155,20 @@ assert null_pickup_count == 0, (
 
 # COMMAND ----------
 
+expected_months_by_year = {}
+for year, month in expected_year_months:
+    expected_months_by_year.setdefault(year, []).append(month)
+
+allowed_pickup_date_conditions = " OR ".join(
+    f"(year(tpep_pickup_datetime) = {year} "
+    f"AND month(tpep_pickup_datetime) IN ({', '.join(str(month) for month in sorted(months))}))"
+    for year, months in sorted(expected_months_by_year.items())
+)
+
 out_of_range_count = spark.sql(
     f"""
     SELECT COUNT(*) AS c FROM {BRONZE_TABLE}
-    WHERE NOT (
-        year(tpep_pickup_datetime) = {EXPECTED_YEAR}
-        AND month(tpep_pickup_datetime) BETWEEN 1 AND 6
-    )
+    WHERE NOT ({allowed_pickup_date_conditions})
     """
 ).first()["c"]
 out_of_range_pct = (out_of_range_count / total_count) * 100 if total_count else 0.0
@@ -163,7 +176,9 @@ out_of_range_pct = (out_of_range_count / total_count) * 100 if total_count else 
 # Soft check: bronze does not clean rogue dates; silver DQ rules will quarantine them in Phase 3.
 if out_of_range_count > 0:
     logger.warning(
-        "A7 rogue pickup datetimes (out of expected Jan-Jun 2024) count=%s pct=%.4f",
+        "A7 rogue pickup datetimes outside expected widget range start_month=%s end_month=%s count=%s pct=%.4f",
+        start_month,
+        end_month,
         out_of_range_count,
         out_of_range_pct,
     )

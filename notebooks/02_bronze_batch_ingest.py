@@ -18,16 +18,30 @@ from src.ingestion.bronze import (
     record_ingested_file,
 )
 from src.utils.logging import configure_logging
+from src.utils.params import parse_month_range
 
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
+dbutils.widgets.text("start_month", "2024-01")
+dbutils.widgets.text("end_month", "2024-06")
+
+start_month = dbutils.widgets.get("start_month")
+end_month   = dbutils.widgets.get("end_month")
+parsed_month_range = parse_month_range(start_month, end_month)
+year = parsed_month_range[0][0]
+months = [month for _, month in parsed_month_range]
+if any(parsed_year != year for parsed_year, _ in parsed_month_range):
+    logger.warning(
+        "Bronze ingest assumes a single-year month range start_month=%s end_month=%s",
+        start_month,
+        end_month,
+    )
+
 LANDING_BASE_PATH = "abfss://landing@nyctaxilakehouse.dfs.core.windows.net"
 BRONZE_TABLE = "default.yellow_trips_raw"
 CONTROL_TABLE = "default.ingested_files"
-YEAR = 2024
-MONTHS = range(1, 7)
 
 spark.sql("USE CATALOG bronze")
 
@@ -61,8 +75,9 @@ logger.info("Control table backfill completed rows=%s", backfilled_rows)
 
 months_to_ingest = filter_unprocessed_months(
     spark=spark,
-    year=YEAR,
-    candidate_months=MONTHS,
+    # filter_unprocessed_months accepts one year plus month numbers; this assumes a single-year range.
+    year=year,
+    candidate_months=months,
     landing_base_path=LANDING_BASE_PATH,
     control_table=CONTROL_TABLE,
 )
@@ -83,7 +98,7 @@ else:
     for month in months_to_ingest:
         source_path, row_count = ingest_single_month(
             spark=spark,
-            year=YEAR,
+            year=year,
             month=month,
             landing_base_path=LANDING_BASE_PATH,
             bronze_table=BRONZE_TABLE,

@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import NamedTuple
 
 from src.utils.logging import configure_logging
+from src.utils.params import parse_month_range
 
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
@@ -29,6 +30,21 @@ from pyspark.sql.window import Window
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+dbutils.widgets.text("start_month", "2024-01")
+dbutils.widgets.text("end_month", "2024-06")
+
+start_month = dbutils.widgets.get("start_month")
+end_month   = dbutils.widgets.get("end_month")
+parsed_month_range = parse_month_range(start_month, end_month)
+year = parsed_month_range[0][0]
+months_list = [month for _, month in parsed_month_range]
+if any(parsed_year != year for parsed_year, _ in parsed_month_range):
+    logger.warning(
+        "Silver load assumes a single-year month range start_month=%s end_month=%s",
+        start_month,
+        end_month,
+    )
 
 spark.sql("USE CATALOG bronze")
 
@@ -101,7 +117,9 @@ def normalize_bronze(df: DataFrame) -> DataFrame:
 
 # COMMAND ----------
 
-bronze_df = spark.table(BRONZE_TABLE)
+bronze_df = spark.table(BRONZE_TABLE).filter(
+    (F.col("year") == year) & F.col("month").isin(months_list)
+)
 normalized_df = normalize_bronze(bronze_df)
 
 normalized_df.printSchema()
@@ -207,7 +225,9 @@ def validate_normalized(df: DataFrame) -> DataFrame:
 
 # COMMAND ----------
 
-bronze_df = spark.table(BRONZE_TABLE)
+bronze_df = spark.table(BRONZE_TABLE).filter(
+    (F.col("year") == year) & F.col("month").isin(months_list)
+)
 normalized_df = normalize_bronze(bronze_df)
 validated_df = validate_normalized(normalized_df)
 
@@ -340,11 +360,14 @@ def write_silver(validated_df: DataFrame) -> SilverWriteResult:
         )
         logger.info("First-load created %s", SILVER_CLEAN_TABLE)
 
+    quarantine_partition_filter = " OR ".join(
+        f"(year = {year} AND month = {m})" for m in months_list
+    )
     (
         quarantine_df.write.format("delta")
         .partitionBy("year", "month")
         .mode("overwrite")
-        .option("overwriteSchema", "true")
+        .option("replaceWhere", quarantine_partition_filter)
         .saveAsTable(SILVER_QUARANTINE_TABLE)
     )
 
@@ -436,7 +459,9 @@ def silver_pipeline(bronze_table_name: str) -> tuple[int, int]:
     started_at = datetime.now()
     logger.info("Silver pipeline starting run_id=%s for %s", run_id, bronze_table_name)
 
-    bronze_df = spark.table(bronze_table_name)
+    bronze_df = spark.table(bronze_table_name).filter(
+        (F.col("year") == year) & F.col("month").isin(months_list)
+    )
     rows_in = bronze_df.count()
 
     normalized_df = normalize_bronze(bronze_df)
