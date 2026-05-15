@@ -189,14 +189,11 @@ logger.info(
     location_to_zone_sk,
 )
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Benchmark SQL
-
-# COMMAND ----------
-
-silver_zone_ids_sql = ", ".join(str(location_id) for location_id in BENCHMARK_ZONE_LOCATION_IDS)
-gold_zone_sks_sql = ", ".join(str(zone_sk) for zone_sk in benchmark_zone_sks)
+# Build benchmark SQL strings in the same cell as the zone resolution so all
+# references to BENCHMARK_ZONE_LOCATION_IDS / benchmark_zone_sks share one
+# execution scope (avoids cross-cell state issues observed on Databricks serverless).
+silver_zone_ids_sql = ", ".join(map(str, BENCHMARK_ZONE_LOCATION_IDS))
+gold_zone_sks_sql = ", ".join(map(str, benchmark_zone_sks))
 
 SILVER_BENCH_SQL = f"""
 SELECT
